@@ -379,4 +379,6 @@ typedef uint64 *pagetable_t; // 512 PTEs
 // MAXVA is actually one bit less than the max allowed by
 // Sv39, to avoid having to sign-extend virtual addresses
 // that have the high bit set.
+// 虚拟地址空间的最高有效地址，用户地址空间为 [0, 2^38)，即
+// 0x0 到 0x3FFFFFFFFF
 #define MAXVA (1L << (9 + 9 + 9 + 12 - 1))

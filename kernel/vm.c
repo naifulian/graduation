@@ -127,24 +127,27 @@ void kvminithart()
 //    0..11 -- 12 bits of byte offset within the page.
 
 /**
-* @brief 用软件的方式模拟 MMU 遍历页表，查找或创建虚拟地址(va)对应的页表项(PTE)
-* - L2：顶级页表，使用虚拟地址高 9 位(30-38)索引
-* - L1：中间页表：使用虚拟地址中间 9 位(21-29)索引
-* - L0：叶页表，使用虚拟地址低 9 位(12-20)索引
+* @brief 用软件的方式模拟 MMU 遍历页表，查找或创建虚拟地址(va)的页表项(PTE)
+* @note
+* L2：顶级页表，使用虚拟地址高 9 位(30-38)索引
+* L1：中间页表，使用虚拟地址中间 9 位(21-29)索引
+* L0：叶页表，使用虚拟地址低 9 位(12-20)索引
 * 
-* @note walk 函数正常工作的前提是在进行内核地址空间的映射时，物理内存和
-        虚拟内存之间采用的是直接映射的方法
-*
-* walk 函数遍历 Sv39 的三级页表结构，查找给定的虚拟地址对应的页表项。
+* @note walk 函数遍历 Sv39 的三级页表结构，查找给定的虚拟地址对应的页表项。
 * 如果中间层页表不存在且允许分配，也会动态创建所需的页表
+*
+* @note walk 函数正常工作的前提是在进行内核地址空间的映射时，物理内存和
+* 虚拟内存之间采用的是直接映射的方法
 *
 * @param pagetable 顶级页表 L2 的内核虚拟地址，必须已建立内核映射 
 * @param va 需要查询的虚拟地址，必须是 39 位有效地址(va < MAXVA)
 * @param alloc 是否进行页表分配的标志：
 *                           - 1 = 自动分配缺失页表
 *                           - 0 = 遇到缺失页表返回空
+*
 * @return 成功时返回指向 PTE 的内核虚拟地址指针，
           失败返回 0，当 alloc=0 时页表缺失或 alloc=1 时内存不足
+* @example 当前进程虚拟地址 va 对应的物理地址pa = PTE2PA(walk(myproc()->pagetable, va, 0))
 */
 pte_t *
 walk(pagetable_t pagetable, uint64 va, int alloc)
@@ -153,7 +156,7 @@ walk(pagetable_t pagetable, uint64 va, int alloc)
     if (va >= MAXVA)
         panic("walk");
 
-    // 逐级处理 L2 和 L1 页表，最后单独处理 L0 页表
+    // 逐级处理 L2 和 L1 页表，for 循环执行完成之后 pte 应指向 L0 页表
     for (int level = 2; level > 0; level--) {
         // 根据当前层级和虚地址计算页表项索引
         pte_t *pte = &pagetable[PX(level, va)];
@@ -300,34 +303,43 @@ int mappages(pagetable_t pagetable, uint64 va, uint64 size, uint64 pa, int perm)
 // page-aligned. The mappings must exist.
 // Optionally free the physical memory.
 /**
- * @brief
- * @param pagetable
- * @param va
- * @param npages
- * @param do_free
+ * @brief 取消用户页表中从虚拟地址 va 开始的 npages 个页面，可以选择是否释放物理页
+ * @note va 必须是页对齐的
+ * @param pagetable 要操作的页表的指针
+ * @param va 需要取消映射的起始虚拟地址
+ * @param npages 要取消映射的页数
+ * @param do_free 标志位，决定是否释放对应的物理内存，1 = 释放，0 = 不释放
  */
-void
-uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
+void uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
 {
-  uint64 a;
-  pte_t *pte;
+    uint64 a;
+    pte_t *pte;
 
-  if((va % PGSIZE) != 0)
-    panic("uvmunmap: not aligned");
-
-  for(a = va; a < va + npages*PGSIZE; a += PGSIZE){
-    if((pte = walk(pagetable, a, 0)) == 0)
-      panic("uvmunmap: walk");
-    if((*pte & PTE_V) == 0)
-      panic("uvmunmap: not mapped");
-    if(PTE_FLAGS(*pte) == PTE_V)
-      panic("uvmunmap: not a leaf");
-    if(do_free){
-      uint64 pa = PTE2PA(*pte);
-      kfree((void*)pa);
+    // 确保虚拟地址 va 页对齐的
+    if ((va % PGSIZE) != 0)
+        panic("uvmunmap: not aligned");
+    
+    for (a = va; a < va + npages * PGSIZE; a += PGSIZE) {
+        // 使用 walk 函数查找虚拟地址 va 对应的页表项，返回 0 表示页表项缺失
+        if ((pte = walk(pagetable, a, 0)) == 0)
+            panic("uvmunmap: walk");
+        // 检查页表项是否有效，PTE_V 为 0 表示该页表项未被映射
+        if ((*pte & PTE_V) == 0)
+            panic("uvmunmap: not mapped");
+        
+        // 检查页表项是否是叶页表(是否映射到物理页)
+        if (PTE_FLAGS(*pte) == PTE_V)
+            panic("uvmunmap: not a leaf");
+        // 如果需要释放物理内存
+        if (do_free) {
+            // 从页表项中提取物理地址
+            uint64 pa = PTE2PA(*pte);
+            // 调用 kfree 释放物理内存
+            kfree((void *)pa);
+        }
+        // 将页表项清零，取消映射
+        *pte = 0;
     }
-    *pte = 0;
-  }
 }
 
 // create an empty user page table.
@@ -413,18 +425,31 @@ uvmalloc(pagetable_t pagetable, uint64 oldsz, uint64 newsz, int xperm)
 // newsz.  oldsz and newsz need not be page-aligned, nor does newsz
 // need to be less than oldsz.  oldsz can be larger than the actual
 // process size.  Returns the new process size.
+/**
+ * @brief 释放用户页，将进程内存大小从 oldsz 调整到 newsz(收缩内存)
+ * @param pagetable 需要调整的页表
+ * @note
+ * 1. oldsz 和 newsz 不需要页对齐
+ * 2. newsz 不一定要小于 oldsz
+ * 3. oldsz 可以大于实际进程的内存大小
+ * @param oldsz 当前的内存大小
+ * @param newsz 进程新的内存大小
+ * @return 调整后的内存大小
+ */
 uint64
 uvmdealloc(pagetable_t pagetable, uint64 oldsz, uint64 newsz)
 {
-  if(newsz >= oldsz)
-    return oldsz;
+    // 如果不需要收缩内存，则直接返回当前大小
+    if (newsz >= oldsz)
+        return oldsz;
 
-  if(PGROUNDUP(newsz) < PGROUNDUP(oldsz)){
-    int npages = (PGROUNDUP(oldsz) - PGROUNDUP(newsz)) / PGSIZE;
-    uvmunmap(pagetable, PGROUNDUP(newsz), npages, 1);
-  }
+    // 对 newsz 和 oldsz 进行页对齐，在 newsz < oldzs 的情况下才操作
+    if (PGROUNDUP(newsz) < PGROUNDUP(oldsz)) {
+        int npages = (PGROUNDUP(oldsz) - PGROUNDUP(newsz)) / PGSIZE;
+        uvmunmap(pagetable, PGROUNDUP(newsz), npages, 1);
+    }
 
-  return newsz;
+    return newsz;
 }
 
 // Recursively free page-table pages.

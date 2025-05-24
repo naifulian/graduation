@@ -1,5 +1,6 @@
 #ifndef __ASSEMBLER__
 
+
 // which hart (core) is this?
 static inline uint64
 r_mhartid()
@@ -346,39 +347,59 @@ sfence_vma()
   asm volatile("sfence.vma zero, zero");
 }
 
+// 页表项的宏定义，由基本数据类型 unsigned long typedef 
 typedef uint64 pte_t;
+// 指向页表的指针，由基本数据类型 unsigned long* typedef
 typedef uint64 *pagetable_t; // 512 PTEs
 
 #endif // __ASSEMBLER__
 
-#define PGSIZE 4096 // 每个页表所占的字节数
-#define PGSHIFT 12  // 页内偏移
+#define PGSIZE 4096 // 每个页面的大小为 4KB
+#define PGSHIFT 12  // 页内偏移量
 
-#define PGROUNDUP(sz)  (((sz)+PGSIZE-1) & ~(PGSIZE-1)) // 向上对齐：将 sz 向上取整为 PGSIZE 的最近倍数
-#define PGROUNDDOWN(a) (((a)) & ~(PGSIZE-1)) // 向下对齐，将 a 向下取整到 PGSIZE 的最近倍数
+// 向上对齐(地址或大小到下一页边界)
+// 1.对地址：返回 ≥sz 的第一个页起始地址（跳过不完整的部分页）
+// 2.对大小：返回 ≥sz 的最小页整数倍（确保完全覆盖所需内存）
+#define PGROUNDUP(sz)  (((sz)+PGSIZE-1) & ~(PGSIZE-1)) 
 
-#define PTE_V (1L << 0) // valid
-#define PTE_R (1L << 1)
-#define PTE_W (1L << 2)
-#define PTE_X (1L << 3)
-#define PTE_U (1L << 4) // user can access
+// 向下对齐(地址或大小到当前页边界)
+// 1.对地址：返回 ≤a 的当前页起始地址 
+// 2.对大小：返回 ≤a 的最大页整数倍
+#define PGROUNDDOWN(a) (((a)) & ~(PGSIZE-1)) 
 
-// shift a physical address to the right place for a PTE.
-#define PA2PTE(pa) ((((uint64)pa) >> 12) << 10) // 把物理地址 pa 转成可以放进页表项的格式
+#define PTE_V (1L << 0) // 有效位(valid)
+#define PTE_R (1L << 1) // 可读页面(Readable)
+#define PTE_W (1L << 2) // 可写页面(Writeable)
+#define PTE_X (1L << 3) // 可执行页面(executable)
+#define PTE_U (1L << 4) // 用户模式可以访问(user-accessible)
+#define PTE_A (1L << 6) // 处理器访问过(accessed)
 
-#define PTE2PA(pte) (((pte) >> 10) << 12) // 从页表项 pte 中提取出原来的物理地址
 
-#define PTE_FLAGS(pte) ((pte) & 0x3FF) // 取出页表项 pte 的权限标志
+// 将物理地址转为页表项：
+// 1. 右移12位获取物理页号(PPN)
+// 2. 左移10位按Sv39格式放置到PTE的[53:10]位
+#define PA2PTE(pa) ((((uint64)pa) >> 12) << 10) 
+// 将页表项转为物理地址：
+// 1. 右移10位获取PPN
+// 2. 左移12位恢复为物理地址
+#define PTE2PA(pte) (((pte) >> 10) << 12) 
+// 提取PTE的低 10 位标志位
+#define PTE_FLAGS(pte) ((pte) & 0x3FF) 
 
-// extract the three 9-bit page table indices from a virtual address.
-#define PXMASK          0x1FF // 9 bits
-#define PXSHIFT(level)  (PGSHIFT+(9*(level)))
-#define PX(level, va) ((((uint64) (va)) >> PXSHIFT(level)) & PXMASK)
+#define PXMASK 0x1FF    // 页表索引掩码(9 bits)
+#define PXSHIFT(level) (PGSHIFT+(9*(level))) // 计算指定层级索引的起始位
+
+// 从虚拟地址va中提取指定level的9位页表索引
+// level=0: VPN[2] (根页表索引)
+// level=1: VPN[1] 
+// level=2: VPN[0] (最后一级页表索引)
+#define PX(level, va) ((((uint64)(va)) >> PXSHIFT(level)) & PXMASK)
 
 // one beyond the highest possible virtual address.
 // MAXVA is actually one bit less than the max allowed by
 // Sv39, to avoid having to sign-extend virtual addresses
 // that have the high bit set.
-// 虚拟地址空间的最高有效地址，用户地址空间为 [0, 2^38)，即
-// 0x0 到 0x3FFFFFFFFF
+
+// MAXVA 表示虚拟地址空间的最高有效地址，十六进制表示为 0x40 0000 0000
+// xv6 内核的地址空间和进程空间都是使用低位的虚拟地址空间 [0x0, 0x0000 003F FFFF FFFF]
 #define MAXVA (1L << (9 + 9 + 9 + 12 - 1))

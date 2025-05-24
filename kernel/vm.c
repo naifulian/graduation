@@ -132,12 +132,9 @@ void kvminithart()
 * L2：顶级页表，使用虚拟地址高 9 位(30-38)索引
 * L1：中间页表，使用虚拟地址中间 9 位(21-29)索引
 * L0：叶页表，使用虚拟地址低 9 位(12-20)索引
-* 
-* @note walk 函数遍历 Sv39 的三级页表结构，查找给定的虚拟地址对应的页表项。
-* 如果中间层页表不存在且允许分配，也会动态创建所需的页表
 *
 * @note walk 函数正常工作的前提是在进行内核地址空间的映射时，物理内存和
-* 虚拟内存之间采用的是直接映射的方法
+* 虚拟内存之间的映射采用的是直接映射或关闭分页机制
 *
 * @param pagetable 顶级页表 L2 的内核虚拟地址，必须已建立内核映射 
 * @param va 需要查询的虚拟地址，必须是 39 位有效地址(va < MAXVA)
@@ -146,43 +143,41 @@ void kvminithart()
 *                           - 0 = 遇到缺失页表返回空
 *
 * @return 成功时返回指向 PTE 的内核虚拟地址指针，
-          失败返回 0，当 alloc=0 时页表缺失或 alloc=1 时内存不足
+          失败返回 0，当 alloc=0 时页表缺失或 alloc=1 时物理内存不足
 * @example 当前进程虚拟地址 va 对应的物理地址pa = PTE2PA(walk(myproc()->pagetable, va, 0))
 */
 pte_t *
 walk(pagetable_t pagetable, uint64 va, int alloc)
 {
-    // 确保虚地址不超过 Sv39 架构定义的 39 位地址空间
+    // 确保虚地址不超过虚拟地址空间的最高有效地址
     if (va >= MAXVA)
         panic("walk");
 
-    // 逐级处理 L2 和 L1 页表，for 循环执行完成之后 pte 应指向 L0 页表
+    // 模拟三级页表的访问过程
     for (int level = 2; level > 0; level--) {
-        // 根据当前层级和虚地址计算页表项索引
+        // PX(level, va) 得到 level 级页表的页表索引
+        // 根据页表索引在页表中的偏移量得到页表项
         pte_t *pte = &pagetable[PX(level, va)];
         
         // 根据 PTE_V 标志判断页表项是否有效
         if (*pte & PTE_V) {     
-            // 有效，提取物理页号(PPN)并转换为内核虚拟地址
-            // PPN 是物理地址，将其赋值给 pagetable 只有在
-            // 虚拟地址和物理地址相等时才能使用
-            // 即采用直接映射或关闭分页机制
+            // 页表项有效，则从页表项中提取下一级页表的物理地址 PA
+            // 将 PA 强转为 pagetable_t 指针(虚拟地址)
             pagetable = (pagetable_t)PTE2PA(*pte);
         } else {                
-            // 当前 PTE 地址无效，说明对应的页表没有分配
-            // 根据 alloc 标记位决定是否申请新的页表
-            // alloc 为不分配或 kalloc 分配失败时返回空指针
+            // 页表项无效，说明对应的页表没有分配
+            // 标记位 alloc = 1 且物理内存足够时申请新的页表
             if (!alloc || (pagetable = (pde_t *)kalloc()) == 0)
+                // alloc = 0 或 kalloc 分配失败时返回 0，表示查找失败
                 return 0;
             
-            // 将新页表页初始化为 0，以避免因为残留数据被误判为有效 PTE
+            // 将新分配的页表初始化为 0
             memset(pagetable, 0, PGSIZE);
-            // 将新页表的物理地址写入到当前 PTE，并设置有效标志
+            // 将新分配的物理地址存放在上一级页表的页表项中，设置有效页表标志位
             *pte = PA2PTE(pagetable) | PTE_V;
         }
     }
-    // 处理 L0 级页表：返回最终页表项指针，此时不检查 PTE_V 标志
-    // 调用者需自行设置 *pte 的内容（如 PTE_V | PTE_U | PTE_W 等）
+    // 返回最后一级页表的页表项
     return &pagetable[PX(0, va)];
 }
 
@@ -249,14 +244,15 @@ kvmmap(pagetable_t kpgtbl, uint64 va, uint64 pa, uint64 sz, int perm)
 // allocate a needed page-table page.
 
 /** 
-* @brief 将虚拟地址 [va, va+size) 映射到物理地址 [pa, pa+size) 并设置权限 perm
+* @brief 在页表中建立虚拟地址到物理地址的映射（即填充页表项PTE）,
+*将虚拟地址 [va, va+size) 映射到物理地址 [pa, pa+size) 并设置权限 perm
 *
 * @param pagetable 目标的 L2 级页表的内核虚拟地址
 * @param va 待映射的起始虚拟地址，必须按页对齐
 * @param size 映射区域总大小，必须按页对齐
 * @param pa 起始物理地址，必须页对齐
 * @param perm 权限标志
-
+* 
 * @return 成功返回 0，失败返回 -1
 */
 int mappages(pagetable_t pagetable, uint64 va, uint64 size, uint64 pa, int perm)

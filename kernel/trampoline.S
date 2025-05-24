@@ -14,7 +14,7 @@
 #include "memlayout.h"
 
 .section trampsec
-.globl trampoline
+.globl trampoline # vm.c 中声明的全局符号的定义
 .globl usertrap
 trampoline:
 .align 4

@@ -16,4 +16,4 @@ kernel/kernel
 user/usys.S
 .gdbinit
 .vscode
-
+.gdbinit.tmpl-riscv

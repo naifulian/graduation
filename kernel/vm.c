@@ -1,102 +1,60 @@
-#include "types.h"
-#include "param.h"
-#include "types.h"
-#include "memlayout.h"
-#include "elf.h"
-#include "riscv.h"
-#include "defs.h"
-#include "fs.h"
-
-/*
- * the kernel's page table.
- */
-pagetable_t kernel_pagetable;
-
-extern char etext[];  // kernel.ld sets this to end of kernel code.
-
-extern char trampoline[]; // trampoline.S
-
-// Make a direct-map page table for the kernel.
+#include "vm.h"
 
 /**
- * @brief 创建并配置内核页表的映射
- * 
- * @note 直接映射的意义，物理地址 == 虚拟地址
- * 1. 简化早期的启动：在内核启用分页机制前，地址访问的都是物理地址
- * 2. 方便内存管理：kalloc 返回的是物理地址，方便内核操作
- * 3. etext 和 trampoline pagetable 在这里是虚拟地址，但同样可以
- * 当作物理地址使用
- * 
- * @param void
- * 
- * @return 初始化完成的内核页表指针
- * 
- * @details
- * 此函数用于创建页表，并完成下面映射
- * 1. 硬件设备寄存器（UART、VIRTIO、PLIC）
- * 2. 内核代码段（只读可执行）、数据段（可读写）
- * 3. 物理内存的等量映射（direct-map）
- * 4. 跳板页（Trampoline）用于陷入处理
- * 5. 每个进程的内核栈空间
- */
-pagetable_t
-kvmmake(void)
-{
-    pagetable_t kpgtbl;
-
-    // 分配一个物理页作为内核页表的 L2 级页表
-    kpgtbl = (pagetable_t)kalloc();
-    // 清空页表，确保初始无映射
-    memset(kpgtbl, 0, PGSIZE);
-
-    // 映射 UART 设备寄存器（串口通信）
-    // 虚拟地址 UART0 直接映射到物理地址 UART0，大小为 PGSIZE，权限为可读可写
-    kvmmap(kpgtbl, UART0, UART0, PGSIZE, PTE_R | PTE_W);
-
-    // 映射 VIRTIO 磁盘设备寄存器
-    // 虚拟地址 VIRTIO0 直接映射到物理地址 VIRTIO0，权限可读可写
-    kvmmap(kpgtbl, VIRTIO0, VIRTIO0, PGSIZE, PTE_R | PTE_W);
-
-    // 映射 PLIC（Platform-Level Interrupt Controller）中断控制器
-    // PLIC 的 MMIO 区域大小为 0x4000000（64MB），权限可读可写
-    kvmmap(kpgtbl, PLIC, PLIC, 0x4000000, PTE_R | PTE_W);
-
-    // 映射内核代码段（.text）：从 KERNBASE 到 etext
-    // 权限为可读、可执行（禁止写入保护代码）
-    kvmmap(kpgtbl, KERNBASE, KERNBASE, (uint64)etext - KERNBASE, PTE_R | PTE_X);
-
-    // 映射内核数据段（.data、.bss）及可用物理内存（up to PHYSTOP）
-    // 权限为可读可写（数据段需要修改）
-    kvmmap(kpgtbl, (uint64)etext, (uint64)etext, PHYSTOP - (uint64)etext, PTE_R | PTE_W);
-
-    // 映射跳板页（Trampoline）到内核地址空间顶端
-    // 虚拟地址 TRAMPOLINE 映射到物理地址 trampoline 的代码页，权限可读、可执行
-    kvmmap(kpgtbl, TRAMPOLINE, (uint64)trampoline, PGSIZE, PTE_R | PTE_X);
-
-    // 为每个进程分配并映射内核栈（位于内核地址空间的高地址区域）
-    proc_mapstacks(kpgtbl);
-
-    return kpgtbl;
-}
-
-/**
- * @brief 对 kvmmake 的封装，kvmmake 创建页表并配置内核页表的映射
+ * @brief 初始化内核页表
+ * @note 调用 kvmmake() 创建内核页表并建立内核地址空间的映射关系。
  */
 void kvminit(void)
 {
     kernel_pagetable = kvmmake();
 }
 
-// Switch h/w page table register to the kernel's page table,
-// and enable paging.
 /**
- * @brief 启用分页机制并切换至内核页表，刷新 TLB 缓存
- * @note 
- * 内存屏障问题
- * 启用分页之后，在内核态除了内核栈和 trampoline 页面
- * 大部分页面执行的还是直接映射，物理地址还是等于虚拟地址
- * @param  void
- * @return void
+ * @brief 创建并配置内核页表
+ * // Make a direct-map page table for the kernel.
+ * @return 初始化完成的内核页表指针
+ * @note  
+ * 1.内核页表采用直接映射的方式映射 KERNBASE-PHYSTOP 的物理内存到内核虚拟地址空间
+ * 2.trampoline页被映射到虚拟地址空间的顶端
+ * 3.将每个进程的内核栈映射到内核虚拟地址空间的高地址
+ */
+pagetable_t kvmmake(void)
+{
+    pagetable_t kpgtbl;
+
+    // 分配一页物理页作为内核页表的 L2 级页表并将这一页物理内存初始化为0(确保刚开始没映射关系?)
+    kpgtbl = (pagetable_t)kalloc();
+    memset(kpgtbl, 0, PGSIZE);
+
+    /*1.将 0x80000000 地址以下的 IO 设备直接映射到内核的虚拟地址空间*/
+    // 将 UART0 的物理地址直接映射到内核虚拟地址空间，设置为可读可写，用于串口设备通信
+    kvmmap(kpgtbl, UART0, UART0, PGSIZE, PTE_R | PTE_W);
+
+    // 将 VIRTIO0 的物理地址直接映射到内核虚拟地址空间，设置为可读可写，用于虚拟块设备访问
+    kvmmap(kpgtbl, VIRTIO0, VIRTIO0, PGSIZE, PTE_R | PTE_W);
+
+    // 将 PLIC 的物理地址直接映射到内核虚拟地址空间，设置为可读可写
+    kvmmap(kpgtbl, PLIC, PLIC, 0x4000000, PTE_R | PTE_W);
+
+    //直映射内核代码段（.text 段），起始地址为 KERNBASE，终止地址为 etext，权限为只读和可执行（防止内核代码段被修改）
+    kvmmap(kpgtbl, KERNBASE, KERNBASE, (uint64)etext - KERNBASE, PTE_R | PTE_X);
+
+    // 直接映射内核数据段（.data 和 .bss），权限为可读可写（数据段需要修改）
+    kvmmap(kpgtbl, (uint64)etext, (uint64)etext, PHYSTOP - (uint64)etext, PTE_R | PTE_W);
+
+    // 将 trampoline 页映射到内核虚拟地址空间的高端（TRAMPOLINE 处），用于用户态与内核态之间切换的入口，权限为只读和可执行
+    kvmmap(kpgtbl, TRAMPOLINE, (uint64)trampoline, PGSIZE, PTE_R | PTE_X);
+
+    // 为所有进程预留并映射内核栈空间（每个进程一个栈），用于处理内核态上下文（如系统调用或中断）
+    proc_mapstacks(kpgtbl);
+
+    return kpgtbl;
+}
+
+
+/**
+ * @brief 设置 SATP 寄存器为内核页表的物理地址并启用分页
+ * @note 在 RISCV 上，只要把 satp 寄存器设为合法值就会自动分页
  */
 void kvminithart()
 {   
@@ -113,42 +71,20 @@ void kvminithart()
     sfence_vma();
 }
 
-// Return the address of the PTE in page table pagetable
-// that corresponds to virtual address va.  If alloc!=0,
-// create any required page-table pages.
-//
-// The risc-v Sv39 scheme has three levels of page-table
-// pages. A page-table page contains 512 64-bit PTEs.
-// A 64-bit virtual address is split into five fields:
-//   39..63 -- must be zero.
-//   30..38 -- 9 bits of level-2 index.
-//   21..29 -- 9 bits of level-1 index.
-//   12..20 -- 9 bits of level-0 index.
-//    0..11 -- 12 bits of byte offset within the page.
 
 /**
 * @brief 用软件的方式模拟 MMU 遍历页表，查找或创建虚拟地址(va)的页表项(PTE)
-* @note
-* L2：顶级页表，使用虚拟地址高 9 位(30-38)索引
-* L1：中间页表，使用虚拟地址中间 9 位(21-29)索引
-* L0：叶页表，使用虚拟地址低 9 位(12-20)索引
-*
 * @note walk 函数正常工作的前提是在进行内核地址空间的映射时，物理内存和
 * 虚拟内存之间的映射采用的是直接映射或关闭分页机制
-*
 * @param pagetable 顶级页表 L2 的内核虚拟地址，必须已建立内核映射 
 * @param va 需要查询的虚拟地址，必须是 39 位有效地址(va < MAXVA)
-* @param alloc 是否进行页表分配的标志：
-*                           - 1 = 自动分配缺失页表
-*                           - 0 = 遇到缺失页表返回空
-*
-* @return 成功时返回指向 PTE 的内核虚拟地址指针，
-          失败返回 0，当 alloc=0 时页表缺失或 alloc=1 时物理内存不足
-* @example 当前进程虚拟地址 va 对应的物理地址pa = PTE2PA(walk(myproc()->pagetable, va, 0))
+* @param alloc 页表项无效时是否进行页表分配的标志，0 为不分配，1 为分配
+* @return 成功时返回指向 PTE 的内核虚拟地址指针，失败返回 0(当页表项无效且 alloc = 0 或物理内存不足时)
+* @example 使用示例 
+* 当前进程虚拟地址 va 对应的物理地址pa = PTE2PA(walk(myproc()->pagetable, va, 0))
 */
 pte_t *
-walk(pagetable_t pagetable, uint64 va, int alloc)
-{
+walk(pagetable_t pagetable, uint64 va, int alloc) {
     // 确保虚地址不超过虚拟地址空间的最高有效地址
     if (va >= MAXVA)
         panic("walk");
@@ -181,18 +117,12 @@ walk(pagetable_t pagetable, uint64 va, int alloc)
     return &pagetable[PX(0, va)];
 }
 
-// Look up a virtual address, return the physical address,
-// or 0 if not mapped.
-// Can only be used to look up user pages.
+
 /**
- * @brief walkaddr函数是walk函数的一层封装，专门
- * 用来查找用户页表中特定虚拟地址 va 所对应的物理地址
- * @note
- * 1. walkaddr 函数只用来查找用户页表
- * 2. 返回的是物理地址，而不是像 walk 一样返回最终的 PTE 
+ * @brief 查找用户页表中的虚拟地址 va 所映射对应的物理地址，虚拟地址未被映射时返回 0
  * @param pagetable 用户页表
  * @param va 要查找的虚拟地址
- * @return 成功返回对应的物理地址，失败返回 0
+ * @return 成功时返回虚拟地址对应的的物理地址，失败返回 0
  */
 uint64
 walkaddr(pagetable_t pagetable, uint64 va)
@@ -218,11 +148,9 @@ walkaddr(pagetable_t pagetable, uint64 va)
     return pa;
 }
 
-// add a mapping to the kernel page table.
-// only used when booting.
-// does not flush TLB or enable paging.
+
 /**
- * @brief 此函数是对 mappages 的封装，专门用于内核初始化阶段的内存映射
+ * @brief 向内核页表中添加地址映射，仅在内核启动时使用，不刷新 TLB 或启用分页
  * 
  * @param kpgtbl    内核页表指针
  * @param va        要映射的虚拟地址，必须按页对齐
@@ -230,29 +158,21 @@ walkaddr(pagetable_t pagetable, uint64 va)
  * @param sz        映射区域的总大小，必须按页对齐
  * @param perm      权限标志
  */
-void
-kvmmap(pagetable_t kpgtbl, uint64 va, uint64 pa, uint64 sz, int perm)
+void kvmmap(pagetable_t kpgtbl, uint64 va, uint64 pa, uint64 sz, int perm)
 {
-  if(mappages(kpgtbl, va, sz, pa, perm) != 0)
-    panic("kvmmap");
+    if (mappages(kpgtbl, va, sz, pa, perm) != 0)
+        panic("kvmmap");
 }
 
-// Create PTEs for virtual addresses starting at va that refer to
-// physical addresses starting at pa.
-// va and size MUST be page-aligned.
-// Returns 0 on success, -1 if walk() couldn't
-// allocate a needed page-table page.
 
 /** 
-* @brief 在页表中建立虚拟地址到物理地址的映射（即填充页表项PTE）,
-*将虚拟地址 [va, va+size) 映射到物理地址 [pa, pa+size) 并设置权限 perm
-*
-* @param pagetable 目标的 L2 级页表的内核虚拟地址
+* @brief 在页表中创建页表项，建立虚拟地址 [va, va+size) 到物理地址 [pa, pa+size)的映射
+* @note va 和 size 必须是按页对齐的
+* @param pagetable 要映射的页表
 * @param va 待映射的起始虚拟地址，必须按页对齐
 * @param size 映射区域总大小，必须按页对齐
-* @param pa 起始物理地址，必须页对齐
+* @param pa 起始物理地址，必须按页对齐
 * @param perm 权限标志
-* 
 * @return 成功返回 0，失败返回 -1
 */
 int mappages(pagetable_t pagetable, uint64 va, uint64 size, uint64 pa, int perm)
@@ -295,12 +215,10 @@ int mappages(pagetable_t pagetable, uint64 va, uint64 size, uint64 pa, int perm)
     return 0;
 }
 
-// Remove npages of mappings starting from va. va must be
-// page-aligned. The mappings must exist.
-// Optionally free the physical memory.
+
 /**
- * @brief 取消用户页表中从虚拟地址 va 开始的 npages 个页面，可以选择是否释放物理页
- * @note va 必须是页对齐的
+ * @brief 取消从虚拟地址 va 开始的 npages 个页面的映射关系
+ * @note va 必须是页对齐的，可以选择是否释放虚拟地址对应的物理内存
  * @param pagetable 要操作的页表的指针
  * @param va 需要取消映射的起始虚拟地址
  * @param npages 要取消映射的页数
@@ -338,14 +256,12 @@ void uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
     }
 }
 
-// create an empty user page table.
-// returns 0 if out of memory.
+
 /**
- * @brief 创建一个新的用户页表
- * @return 成功返回创建的页表指针，内存不足而失败时返回 0
+ * @brief 创建一个空的用户页表
+ * @return 成功则返回创建的页表指针，内存不足而失败时返回 0
  */
-pagetable_t
-uvmcreate()
+pagetable_t uvmcreate()
 {
     pagetable_t pagetable;
     // 分配一个物理页作为页表，kalloc() 返回的是物理地址，
@@ -361,11 +277,9 @@ uvmcreate()
     return pagetable;
 }
 
-// Load the user initcode into address 0 of pagetable,
-// for the very first process.
-// sz must be less than a page.
+
 /**
- * @brief 将第一个用户进程 initcode 加载到页表的 0 地址
+ * @brief 将第一个用户进程 initcode 加载到页表的 0 地址处
  * @param pagetable 目标用户页表
  * @param src 源数据地址(initcode)
  * @param sz 拷贝的字节数
@@ -389,48 +303,47 @@ void uvmfirst(pagetable_t pagetable, uchar *src, uint sz)
     memmove(mem, src, sz);
 }
 
-// Allocate PTEs and physical memory to grow process from oldsz to
-// newsz, which need not be page aligned.  Returns new size or 0 on error.
-uint64
-uvmalloc(pagetable_t pagetable, uint64 oldsz, uint64 newsz, int xperm)
+/**
+ * @brief 分配页表项和物理内存，将进程的内存空间从 oldsz 扩展大 newsz
+ * @note newsz 无序按页对齐
+ * @return 成功返回新大小，失败返回 0
+ */
+uint64 uvmalloc(pagetable_t pagetable, uint64 oldsz, uint64 newsz, int xperm)
 {
-  char *mem;
-  uint64 a;
+    char *mem;
+    uint64 a;
 
-  if(newsz < oldsz)
-    return oldsz;
+    if (newsz < oldsz)
+        return oldsz;
 
-  oldsz = PGROUNDUP(oldsz);
-  for(a = oldsz; a < newsz; a += PGSIZE){
-    mem = kalloc();
-    if(mem == 0){
-      uvmdealloc(pagetable, a, oldsz);
-      return 0;
+    oldsz = PGROUNDUP(oldsz);
+    for (a = oldsz; a < newsz; a += PGSIZE) {
+        mem = kalloc();
+        if (mem == 0) {
+            uvmdealloc(pagetable, a, oldsz);
+            return 0;
+        }
+        memset(mem, 0, PGSIZE);
+        if (mappages(pagetable, a, PGSIZE, (uint64)mem, PTE_R | PTE_U | xperm) != 0) {
+            kfree(mem);
+            uvmdealloc(pagetable, a, oldsz);
+            return 0;
+        }
     }
-    memset(mem, 0, PGSIZE);
-    if(mappages(pagetable, a, PGSIZE, (uint64)mem, PTE_R|PTE_U|xperm) != 0){
-      kfree(mem);
-      uvmdealloc(pagetable, a, oldsz);
-      return 0;
-    }
-  }
-  return newsz;
+    return newsz;
 }
 
-// Deallocate user pages to bring the process size from oldsz to
-// newsz.  oldsz and newsz need not be page-aligned, nor does newsz
-// need to be less than oldsz.  oldsz can be larger than the actual
-// process size.  Returns the new process size.
+
 /**
- * @brief 释放用户页，将进程内存大小从 oldsz 调整到 newsz(收缩内存)
+ * @brief 释放用户页，将进程内存大小从 oldsz 收缩到 newsz
  * @param pagetable 需要调整的页表
+ * @param oldsz 当前的内存大小
+ * @param newsz 进程新的内存大小
+ * @return 调整后的进程内存大小
  * @note
  * 1. oldsz 和 newsz 不需要页对齐
  * 2. newsz 不一定要小于 oldsz
  * 3. oldsz 可以大于实际进程的内存大小
- * @param oldsz 当前的内存大小
- * @param newsz 进程新的内存大小
- * @return 调整后的内存大小
  */
 uint64
 uvmdealloc(pagetable_t pagetable, uint64 oldsz, uint64 newsz)
@@ -448,11 +361,10 @@ uvmdealloc(pagetable_t pagetable, uint64 oldsz, uint64 newsz)
     return newsz;
 }
 
-// Recursively free page-table pages.
-// All leaf mappings must already have been removed.
+
 /**
- * @brief 递归释放整个页表树及占用的物理内存
- * @note 所有叶映射必须已经被解除了
+ * @brief 递归的释放页表所占用的物理页
+ * @note 必须先解除 L0 页表项的映射关系
  * @param pagetable 要释放的页表指针
  */
 void freewalk(pagetable_t pagetable)
@@ -482,24 +394,22 @@ void freewalk(pagetable_t pagetable)
     kfree((void *)pagetable);
 }
 
-// Free user memory pages,
-// then free page-table pages.
-void
-uvmfree(pagetable_t pagetable, uint64 sz)
+/**
+ * @brief 取消用户页表映射关系，然后释放用户页表的物理内存，
+ */
+void uvmfree(pagetable_t pagetable, uint64 sz)
 {
-  if(sz > 0)
-    uvmunmap(pagetable, 0, PGROUNDUP(sz)/PGSIZE, 1);
-  freewalk(pagetable);
+    if (sz > 0)
+        uvmunmap(pagetable, 0, PGROUNDUP(sz) / PGSIZE, 1);
+    freewalk(pagetable);
 }
 
-// Given a parent process's page table, copy
-// its memory into a child's page table.
-// Copies both the page table and the
-// physical memory.
-// returns 0 on success, -1 on failure.
-// frees any allocated pages on failure.
-int
-uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
+/**
+ * @brief 复制父进程页表及物理内u你到子进程页表
+ * @
+ * @return 成功返回 0 失败返回 -1
+ */
+int uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
 {
   pte_t *pte;
   uint64 pa, i;

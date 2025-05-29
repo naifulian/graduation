@@ -10,13 +10,13 @@ volatile static int started = 0;
 void main()
 {
     if (cpuid() == 0) {
-        consoleinit();          // 设置控制台设备（如 UART），为后续 printf 提供输出支持
-        printfinit();           // 初始化内核日志系统，允许使用 printf 打印调试信息。
-        printf("\n");           // 打印内核正在启动的信息
+        consoleinit();          
+        printfinit();           // 设置 printf 的自选锁
+        printf("\n");           
         printf("xv6 kernel is booting\n");
         printf("\n");
-        kinit();                // 初始化物理页分配器 Kmem 管理的空闲链表
-        kvminit();              // 分配一页物理页作为内核页表并设置内核的物理地址空间到虚拟地址空间的映射
+        kinit();                // 物理内存分配器初始化物理内存
+        kvminit();              // 初始化内核页表并配置好内核的虚拟地址空间到物理地址空间的映射
         kvminithart();          // 启用分页
         procinit();             // 初始化进程表
         trapinit();             // 设置陷阱处理程序入口

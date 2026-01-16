@@ -91,3 +91,89 @@ sys_uptime(void)
   release(&tickslock);
   return xticks;
 }
+
+// Change Process priority
+extern int chpr(int, int);
+extern int chtickets(int, int);
+extern int wait2(uint64, uint64, uint64);
+
+uint64
+sys_chpr(void)
+{
+  int pid, pr;
+  argint(0, &pid);
+  argint(1, &pr);
+
+  return chpr(pid, pr);
+}
+
+uint64
+sys_yield(void) {
+  yield();
+  return 0;
+}
+
+uint64
+sys_chtickets(void)
+{
+  int pid, tickets;
+  argint(0, &pid);
+  argint(1, &tickets);
+
+  return chtickets(pid, tickets);
+}
+
+uint64
+sys_getppid(void)
+{
+  return myproc()->parent->pid;
+}
+
+// copy elements from the kernel ptable to the user space
+extern struct proc * getptable_proc(void);
+
+uint64
+sys_getptable(void){
+  int size;
+  uint64 buf_addr;
+  char *buf;
+  char *s;
+  struct proc *p = '\0';
+
+  argint(0, &size);
+  argaddr(1, &buf_addr);
+  buf = (char*)buf_addr;
+
+  s = buf;
+  p = getptable_proc();
+
+  while(buf + size > s && p->state != UNUSED){
+    *(int *)s = p->state;
+    s+=4;
+    *(int *)s = p->pid;
+    s+=4;
+    *(int *)s = p->parent->pid;
+    s+=4;
+    *(int *)s = p->priority;
+    s+=4;
+    *(int *)s = p->tickets;
+    s+=4;
+    *(int *)s = p->ctime;
+    s+=4;
+    memmove(s,p->name,16);
+    s+=16;
+    p++;
+  }
+  return 0;
+}
+
+uint64
+sys_wait2(void) {
+  uint64 retime_addr, rutime_addr, stime_addr;
+  
+  argaddr(0, &retime_addr);
+  argaddr(1, &rutime_addr);
+  argaddr(2, &stime_addr);
+  
+  return wait2(retime_addr, rutime_addr, stime_addr);
+}

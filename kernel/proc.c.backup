@@ -20,12 +20,6 @@ static void freeproc(struct proc *p);
 
 extern char trampoline[]; // trampoline.S
 
-// Scheduling statistics update function
-void updatestatistics(void);
-int random(int max);
-int totalTickets(void);
-struct proc* findReadyProcess(int *index1, int *index2, int *index3, uint *priority);
-
 // helps ensure that wakeups of wait()ing
 // parents are not lost. helps obey the
 // memory model when using p->parent.
@@ -130,21 +124,6 @@ allocproc(void)
 found:
   p->pid = allocpid();
   p->state = USED;
-
-  // Initialize scheduling fields
-  #ifdef PRIORITY
-    p->priority = 10;
-  #else
-  #ifdef SML
-    p->priority = 2;
-  #endif
-  #endif
-  
-  p->ctime = ticks;
-  p->retime = 0;
-  p->rutime = 0;
-  p->stime = 0;
-  p->tickets = DEFAULT_TICKETS;
 
   // Allocate a trapframe page.
   if((p->trapframe = (struct trapframe *)kalloc()) == 0){
@@ -267,8 +246,6 @@ userinit(void)
   p->trapframe->epc = 0;      // user program counter
   p->trapframe->sp = PGSIZE;  // user stack pointer
 
-  p->tickets = DEFAULT_TICKETS; // used in LOTTERY
-
   safestrcpy(p->name, "initcode", sizeof(p->name));
   p->cwd = namei("/");
 
@@ -321,10 +298,6 @@ fork(void)
 
   // copy saved user registers.
   *(np->trapframe) = *(p->trapframe);
-
-  // Copy scheduling fields from parent
-  np->tickets = p->tickets; // used in LOTTERY
-  np->priority = p->priority; // used in PRIORITY and SML
 
   // Cause fork to return 0 in the child.
   np->trapframe->a0 = 0;
@@ -471,137 +444,39 @@ wait(uint64 addr)
 void
 scheduler(void)
 {
-  struct proc *p = 0;
+  struct proc *p;
   struct cpu *c = mycpu();
 
   c->proc = 0;
+  for(;;){
+    // The most recent process to run may have had interrupts
+    // turned off; enable them to avoid a deadlock if all
+    // processes are waiting.
+    intr_on();
 
-  for(;;)
-  {
-      // Enable interrupts on this processor.
+    int found = 0;
+    for(p = proc; p < &proc[NPROC]; p++) {
+      acquire(&p->lock);
+      if(p->state == RUNNABLE) {
+        // Switch to chosen process.  It is the process's job
+        // to release its lock and then reacquire it
+        // before jumping back to us.
+        p->state = RUNNING;
+        c->proc = p;
+        swtch(&c->context, &p->context);
+
+        // Process is done running for now.
+        // It should have changed its p->state before coming back.
+        c->proc = 0;
+        found = 1;
+      }
+      release(&p->lock);
+    }
+    if(found == 0) {
+      // nothing to run; stop running on this core until an interrupt.
       intr_on();
-
-      // Loop over process table looking for process to run.
-      for(p = proc; p < &proc[NPROC]; p++)
-      {
-          acquire(&p->lock);
-
-          #ifdef DEFAULT
-              if(p->state != RUNNABLE) {
-                release(&p->lock);
-                continue;
-              }
-          #else
-          #ifdef PRIORITY
-
-              struct proc *highP = 0;
-              struct proc *p1 = 0;
-
-              if(p->state != RUNNABLE) {
-                release(&p->lock);
-                continue;
-              }
-              // Choose the process with highest priority (among RUNNABLEs)
-              highP = p;
-              for(p1 = proc; p1 < &proc[NPROC]; p1++){
-                acquire(&p1->lock);
-                if((p1->state == RUNNABLE) && (highP->priority > p1->priority))
-                  highP = p1;
-                release(&p1->lock);
-              }
-
-              if(highP != 0)
-                p = highP;
-
-          #else
-          #ifdef FCFS
-
-            struct proc *minP = 0;
-
-            if(p->state != RUNNABLE) {
-              release(&p->lock);
-              continue;
-            }
-
-            // ignore init and sh processes from FCFS
-            if(p->pid > 1)
-            {
-              if (minP != 0){
-                // here I find the process with the lowest creation time (the first one that was created)
-                if(p->ctime < minP->ctime)
-                  minP = p;
-              }
-              else
-                  minP = p;
-            }
-
-            // If I found the process which I created first and it is runnable I run it
-            if(minP != 0 && minP->state == RUNNABLE)
-                p = minP;
-          #else
-          #ifdef LOTTERY
-
-            if(p->state != RUNNABLE) {
-              release(&p->lock);
-              continue;
-            }
-
-            int totalT = totalTickets();
-            int draw = -1;
-
-          	if (totalT > 0 || draw <= 0)
-          		draw = random(totalT);
-
-            draw = draw - p->tickets;
-
-            // process with a great number of tickets has more probability to put draw to 0 or negative and execute
-            if(draw >= 0) {
-              release(&p->lock);
-              continue;
-            }
-          #else
-          #ifdef SML
-
-            struct proc *foundP = 0;
-
-            uint priority = 1;
-
-            int index1 = 0;
-            int index2 = 0;
-            int index3 = 0;
-
-            foundP = findReadyProcess(&index1, &index2, &index3, &priority);
-            if (foundP != 0)
-              p = foundP;
-            else{
-              if(p->state != RUNNABLE) {
-                release(&p->lock);
-                continue;
-              }
-            }
-
-          #endif
-          #endif
-          #endif
-          #endif
-          #endif
-
-          if(p != 0 && p->state == RUNNABLE)
-          {
-            // Switch to chosen process.  It is the process's job
-            // to release its lock and then reacquire it
-            // before jumping back to us.
-            c->proc = p;
-            p->state = RUNNING;
-
-            swtch(&c->context, &p->context);
-
-            // Process is done running for now.
-            // It should have changed its p->state before coming back.
-            c->proc = 0;
-          }
-          release(&p->lock);
-        }
+      asm volatile("wfi");
+    }
   }
 }
 
@@ -817,228 +692,4 @@ procdump(void)
     printf("%d %s %s", p->pid, state, p->name);
     printf("\n");
   }
-}
-
-/*
-  This method will run every clock tick and update the statistic fields for each proc
-*/
-void updatestatistics() {
-  struct proc *p;
-  for(p = proc; p < &proc[NPROC]; p++){
-    acquire(&p->lock);
-    switch(p->state) {
-      case SLEEPING:
-        p->stime++;
-        break;
-      case RUNNABLE:
-        p->retime++;
-        break;
-      case RUNNING:
-        p->rutime++;
-        break;
-      default:
-        ;
-    }
-    release(&p->lock);
-  }
-}
-
-/* This method is used to generate a random number, between 0 and M
-This is a modified version of the LFSR alogrithm
-found here: http://goo.gl/At4AIC */
-int
-random(int max) {
-
-  if(max <= 0) {
-    return 1;
-  }
-
-  static int z1 = 12345; // 12345 for rest of zx
-  static int z2 = 12345; // 12345 for rest of zx
-  static int z3 = 12345; // 12345 for rest of zx
-  static int z4 = 12345; // 12345 for rest of zx
-
-  int b;
-  b = (((z1 << 6) ^ z1) >> 13);
-  z1 = (((z1 & 4294967294) << 18) ^ b);
-  b = (((z2 << 2) ^ z2) >> 27);
-  z2 = (((z2 & 4294967288) << 2) ^ b);
-  b = (((z3 << 13) ^ z3) >> 21);
-  z3 = (((z3 & 4294967280) << 7) ^ b);
-  b = (((z4 << 3) ^ z4) >> 12);
-  z4 = (((z4 & 4294967168) << 13) ^ b);
-
-  // if we have an argument, then we can use it
-  int rand = ((z1 ^ z2 ^ z3 ^ z4)) % max;
-
-  if(rand < 0) {
-    rand = rand * -1;
-  }
-
-  return rand;
-}
-
-/* This method counts the total number of tickets that the runnable processes have
-(the lottery is done only of the process which can execute) */
-int
-totalTickets(void) {
-
-	struct proc *p;
-	int total = 0;
-	for (p = proc; p < &proc[NPROC]; p++) {
-    acquire(&p->lock);
-		if (p->state == RUNNABLE) {
-			total += p->tickets;
-		}
-    release(&p->lock);
-	}
-
-	return total;
-}
-
-#ifdef SML
-/*
-  this method will find the next process to run
-*/
-struct proc* findReadyProcess(int *index1, int *index2, int *index3, uint *priority) {
-  int i;
-  struct proc* proc2;
-notfound:
-  for (i = 0; i < NPROC; i++) {
-    switch(*priority) {
-      case 1:
-        proc2 = &proc[(*index1 + i) % NPROC];
-        acquire(&proc2->lock);
-        if (proc2->state == RUNNABLE && proc2->priority == *priority) {
-          *index1 = (*index1 + 1 + i) % NPROC;
-          release(&proc2->lock);
-          return proc2; // found a runnable process with appropriate priority
-        }
-        release(&proc2->lock);
-      case 2:
-        proc2 = &proc[(*index2 + i) % NPROC];
-        acquire(&proc2->lock);
-        if (proc2->state == RUNNABLE && proc2->priority == *priority) {
-          *index2 = (*index2 + 1 + i) % NPROC;
-          release(&proc2->lock);
-          return proc2; // found a runnable process with appropriate priority
-        }
-        release(&proc2->lock);
-      case 3:
-        proc2 = &proc[(*index3 + i) % NPROC];
-        acquire(&proc2->lock);
-        if (proc2->state == RUNNABLE && proc2->priority == *priority){
-          *index3 = (*index3 + 1 + i) % NPROC;
-          release(&proc2->lock);
-          return proc2; // found a runnable process with appropriate priority
-        }
-        release(&proc2->lock);
-    }
-  }
-  if (*priority == 3) {//did not find any process on any of the prorities
-    *priority = 3;
-    return 0;
-  }
-  else {
-    *priority += 1; //will try to find a process at a lower priority (ighter value of priority)
-    goto notfound;
-  }
-  return 0;
-}
-#endif
-
-// Change Process priority
-int
-chpr(int pid, int priority)
-{
-  struct proc *p;
-
-  for(p = proc; p < &proc[NPROC]; p++){
-    acquire(&p->lock);
-    if(p->pid == pid) {
-        p->priority = priority;
-        release(&p->lock);
-        break;
-    }
-    release(&p->lock);
-  }
-
-  return pid;
-}
-
-// Change Process tickets
-int
-chtickets(int pid, int tickets)
-{
-  struct proc *p;
-
-  for(p = proc; p < &proc[NPROC]; p++){
-    acquire(&p->lock);
-    if(p->pid == pid) {
-        p->tickets = tickets;
-        release(&p->lock);
-        break;
-    }
-    release(&p->lock);
-  }
-
-  return pid;
-}
-
-int wait2(uint64 retime_addr, uint64 rutime_addr, uint64 stime_addr) {
-  struct proc *p;
-  int havekids, pid;
-  struct proc *curproc = myproc();
-  
-  acquire(&wait_lock);
-  for(;;){
-    // Scan through table looking for zombie children.
-    havekids = 0;
-    for(p = proc; p < &proc[NPROC]; p++){
-      if(p->parent != curproc)
-        continue;
-      havekids = 1;
-      acquire(&p->lock);
-      if(p->state == ZOMBIE){
-        // Found one.
-        pid = p->pid;
-        
-        // Copy statistics to user space
-        if(retime_addr != 0 && copyout(curproc->pagetable, retime_addr, (char *)&p->retime, sizeof(p->retime)) < 0) {
-          release(&p->lock);
-          release(&wait_lock);
-          return -1;
-        }
-        if(rutime_addr != 0 && copyout(curproc->pagetable, rutime_addr, (char *)&p->rutime, sizeof(p->rutime)) < 0) {
-          release(&p->lock);
-          release(&wait_lock);
-          return -1;
-        }
-        if(stime_addr != 0 && copyout(curproc->pagetable, stime_addr, (char *)&p->stime, sizeof(p->stime)) < 0) {
-          release(&p->lock);
-          release(&wait_lock);
-          return -1;
-        }
-        
-        freeproc(p);
-        release(&p->lock);
-        release(&wait_lock);
-        return pid;
-      }
-      release(&p->lock);
-    }
-
-    // No point waiting if we don't have any children.
-    if(!havekids || killed(curproc)){
-      release(&wait_lock);
-      return -1;
-    }
-
-    // Wait for children to exit.
-    sleep(curproc, &wait_lock);
-  }
-}
-
-struct proc *getptable_proc(void) {
-  return proc;
 }

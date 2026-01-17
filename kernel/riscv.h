@@ -452,6 +452,7 @@ typedef uint64 *pagetable_t; // 512 PTEs
 #define PTE_X (1L << 3) // 可执行页面(executable)
 #define PTE_U (1L << 4) // 用户模式可以访问(user-accessible)
 #define PTE_A (1L << 6) // 处理器访问过(accessed)
+#define PTE_COW (1L << 8) // 写时复制页面(Copy-on-Write)
 
 /*----------------------------------------------------------
  * 页表项转换宏

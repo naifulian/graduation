@@ -152,8 +152,18 @@ loadseg(pagetable_t pagetable, uint64 va, struct inode *ip, uint offset, uint sz
 
   for(i = 0; i < sz; i += PGSIZE){
     pa = walkaddr(pagetable, va + i);
-    if(pa == 0)
-      panic("loadseg: address should exist");
+    if(pa == 0) {
+      // Lazy allocation: allocate page now
+      char *mem = kalloc();
+      if(mem == 0)
+        return -1;
+      memset(mem, 0, PGSIZE);
+      if(mappages(pagetable, va + i, PGSIZE, (uint64)mem, PTE_W|PTE_X|PTE_R|PTE_U) != 0) {
+        kfree(mem);
+        return -1;
+      }
+      pa = (uint64)mem;
+    }
     if(sz - i < PGSIZE)
       n = sz - i;
     else

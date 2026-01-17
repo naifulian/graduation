@@ -236,21 +236,27 @@ void uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
     for (a = va; a < va + npages * PGSIZE; a += PGSIZE) {
         // 使用 walk 函数查找虚拟地址 va 对应的页表项，返回 0 表示页表项缺失
         if ((pte = walk(pagetable, a, 0)) == 0)
-            panic("uvmunmap: walk");
+            continue; // Skip if page table doesn't exist (lazy allocation)
         // 检查页表项是否有效，PTE_V 为 0 表示该页表项未被映射
         if ((*pte & PTE_V) == 0)
-            panic("uvmunmap: not mapped");
+            continue; // Skip if page not mapped (lazy allocation)
         
         // 检查页表项是否是叶页表(是否映射到物理页)
         if (PTE_FLAGS(*pte) == PTE_V)
             panic("uvmunmap: not a leaf");
+        
+        // 从页表项中提取物理地址
+        uint64 pa = PTE2PA(*pte);
+        
         // 如果需要释放物理内存
         if (do_free) {
-            // 从页表项中提取物理地址
-            uint64 pa = PTE2PA(*pte);
-            // 调用 kfree 释放物理内存
-            kfree((void *)pa);
+            // 对于COW页面，递减引用计数
+            if(decref((void*)pa)) {
+                // 如果引用计数为0，释放物理内存
+                kfree((void *)pa);
+            }
         }
+        
         // 将页表项清零，取消映射
         *pte = 0;
     }
@@ -310,26 +316,11 @@ void uvmfirst(pagetable_t pagetable, uchar *src, uint sz)
  */
 uint64 uvmalloc(pagetable_t pagetable, uint64 oldsz, uint64 newsz, int xperm)
 {
-    char *mem;
-    uint64 a;
-
+    // Lazy allocation: only update the size, don't allocate physical memory yet
     if (newsz < oldsz)
         return oldsz;
 
-    oldsz = PGROUNDUP(oldsz);
-    for (a = oldsz; a < newsz; a += PGSIZE) {
-        mem = kalloc();
-        if (mem == 0) {
-            uvmdealloc(pagetable, a, oldsz);
-            return 0;
-        }
-        memset(mem, 0, PGSIZE);
-        if (mappages(pagetable, a, PGSIZE, (uint64)mem, PTE_R | PTE_U | xperm) != 0) {
-            kfree(mem);
-            uvmdealloc(pagetable, a, oldsz);
-            return 0;
-        }
-    }
+    // Just update the size, physical memory will be allocated on page fault
     return newsz;
 }
 
@@ -405,7 +396,7 @@ void uvmfree(pagetable_t pagetable, uint64 sz)
 }
 
 /**
- * @brief 复制父进程页表及物理内u你到子进程页表
+ * @brief 复制父进程页表及物理内存到子进程页表（使用写时复制）
  * @
  * @return 成功返回 0 失败返回 -1
  */
@@ -414,20 +405,29 @@ int uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
   pte_t *pte;
   uint64 pa, i;
   uint flags;
-  char *mem;
 
   for(i = 0; i < sz; i += PGSIZE){
     if((pte = walk(old, i, 0)) == 0)
-      panic("uvmcopy: pte should exist");
+      continue; // Skip if page table doesn't exist (lazy allocation)
     if((*pte & PTE_V) == 0)
-      panic("uvmcopy: page not present");
+      continue; // Skip if page not present (lazy allocation)
+    
     pa = PTE2PA(*pte);
     flags = PTE_FLAGS(*pte);
-    if((mem = kalloc()) == 0)
-      goto err;
-    memmove(mem, (char*)pa, PGSIZE);
-    if(mappages(new, i, PGSIZE, (uint64)mem, flags) != 0){
-      kfree(mem);
+    
+    // Clear PTE_W and set PTE_COW for both parent and child
+    flags = (flags & ~PTE_W) | PTE_COW;
+    
+    // Update parent's PTE
+    *pte = PA2PTE(pa) | flags | PTE_V;
+    
+    // Increment reference count
+    incref((void*)pa);
+    
+    // Map the same physical page to child with COW flags
+    if(mappages(new, i, PGSIZE, pa, flags) != 0){
+      // If mapping fails, decrement the refcount we just incremented
+      decref((void*)pa);
       goto err;
     }
   }
@@ -466,8 +466,21 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
       return -1;
     pte = walk(pagetable, va0, 0);
     if(pte == 0 || (*pte & PTE_V) == 0 || (*pte & PTE_U) == 0 ||
-       (*pte & PTE_W) == 0)
-      return -1;
+       (*pte & PTE_W) == 0) {
+      // Lazy allocation: allocate page now
+      char *mem = kalloc();
+      if(mem == 0)
+        return -1;
+      memset(mem, 0, PGSIZE);
+      if(mappages(pagetable, va0, PGSIZE, (uint64)mem, PTE_W|PTE_R|PTE_U) != 0) {
+        kfree(mem);
+        return -1;
+      }
+      pte = walk(pagetable, va0, 0);
+      if(pte == 0 || (*pte & PTE_V) == 0 || (*pte & PTE_U) == 0 ||
+         (*pte & PTE_W) == 0)
+        return -1;
+    }
     pa0 = PTE2PA(*pte);
     n = PGSIZE - (dstva - va0);
     if(n > len)

@@ -70,6 +70,67 @@ usertrap(void)
     syscall();
   } else if((which_dev = devintr()) != 0){
     // ok
+  } else if(r_scause() == 13 || r_scause() == 15) {
+    // Page fault (13 = load page fault, 15 = store/AMO page fault)
+    uint64 va = r_stval();
+    if(va >= p->sz || va < PGSIZE) {
+      // Invalid address
+      printf("usertrap(): page fault on invalid address 0x%lx pid=%d\n", va, p->pid);
+      setkilled(p);
+    } else {
+      pte_t *pte = walk(p->pagetable, va, 0);
+      if(pte == 0) {
+        // Lazy allocation for non-existent page table
+        char *mem = kalloc();
+        if(mem == 0) {
+          printf("usertrap(): out of memory for lazy allocation pid=%d\n", p->pid);
+          setkilled(p);
+        } else {
+          memset(mem, 0, PGSIZE);
+          if(mappages(p->pagetable, PGROUNDDOWN(va), PGSIZE, (uint64)mem, PTE_W|PTE_X|PTE_R|PTE_U) != 0) {
+            kfree(mem);
+            printf("usertrap(): failed to map page for lazy allocation pid=%d\n", p->pid);
+            setkilled(p);
+          }
+        }
+      } else if((*pte & PTE_V) && (*pte & PTE_COW)) {
+        // COW page fault
+        uint64 pa = PTE2PA(*pte);
+        char *mem = kalloc();
+        if(mem == 0) {
+          printf("usertrap(): out of memory for COW allocation pid=%d\n", p->pid);
+          setkilled(p);
+        } else {
+          // Copy the page content
+          memmove(mem, (char*)pa, PGSIZE);
+          // Update PTE: clear COW flag, set write permission
+          uint flags = (PTE_FLAGS(*pte) & ~PTE_COW) | PTE_W;
+          *pte = PA2PTE((uint64)mem) | flags | PTE_V;
+          // Decrement reference count for old page
+          if(decref((void*)pa)) {
+            kfree((void*)pa);
+          }
+        }
+      } else if((*pte & PTE_V) == 0) {
+        // Lazy allocation for unmapped page
+        char *mem = kalloc();
+        if(mem == 0) {
+          printf("usertrap(): out of memory for lazy allocation pid=%d\n", p->pid);
+          setkilled(p);
+        } else {
+          memset(mem, 0, PGSIZE);
+          if(mappages(p->pagetable, PGROUNDDOWN(va), PGSIZE, (uint64)mem, PTE_W|PTE_X|PTE_R|PTE_U) != 0) {
+            kfree(mem);
+            printf("usertrap(): failed to map page for lazy allocation pid=%d\n", p->pid);
+            setkilled(p);
+          }
+        }
+      } else {
+        // Other page fault (e.g., permission error)
+        printf("usertrap(): unexpected page fault va=0x%lx pte=0x%lx pid=%d\n", va, *pte, p->pid);
+        setkilled(p);
+      }
+    }
   } else {
     printf("usertrap(): unexpected scause 0x%lx pid=%d\n", r_scause(), p->pid);
     printf("            sepc=0x%lx stval=0x%lx\n", r_sepc(), r_stval());

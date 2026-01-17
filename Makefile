@@ -146,6 +146,9 @@ UPROGS=\
 	$U/_zombie\
 	$U/_test_sched\
 	$U/_simple_test\
+	$U/_lazy_test\
+	$U/_cow_test\
+	$U/_memory_test\
 
 fs.img: mkfs/mkfs README $(UPROGS)
 	mkfs/mkfs fs.img README $(UPROGS)
